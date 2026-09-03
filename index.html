@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PantryPilot — Your kitchen, co-piloted</title>
+<meta name="description" content="An agent-native kitchen app. Humans stock the pantry, AI agents plan the week via WebMCP.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🥕</text></svg>">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">🥕</span>
+    <div>
+      <h1>PantryPilot</h1>
+      <p class="tagline">Your kitchen, co-piloted. Built for humans <em>and</em> their agents.</p>
+    </div>
+  </div>
+  <div class="header-right">
+    <span id="mcp-status" class="pill pill-off" title="WebMCP availability in this browser">● WebMCP: not detected</span>
+    <button id="btn-agent" class="btn btn-agent">🤖 Agent Console</button>
+  </div>
+</header>
+
+<main>
+  <nav class="tabs">
+    <button class="tab active" data-tab="pantry">🧺 Pantry</button>
+    <button class="tab" data-tab="plan">📅 Week Plan</button>
+    <button class="tab" data-tab="shopping">🛒 Shopping List</button>
+    <button class="tab" data-tab="recipes">🍲 Recipes</button>
+    <button class="tab" data-tab="about">🌐 WebMCP</button>
+  </nav>
+
+  <!-- PANTRY -->
+  <section id="tab-pantry" class="panel active">
+    <div class="panel-head">
+      <h2>Pantry inventory</h2>
+      <p class="hint">Add what's in your kitchen — or ask your agent to do it with <code>add_pantry_items</code>. Items nearing expiry glow red; the agent plans meals to use them first.</p>
+    </div>
+    <form id="pantry-form" class="add-form">
+      <input id="f-name" placeholder="Item (e.g. Spinach)" required autocomplete="off">
+      <input id="f-qty" type="number" min="0.1" step="0.1" value="1" title="Quantity">
+      <select id="f-unit">
+        <option>pcs</option><option>g</option><option>kg</option><option>ml</option><option>l</option><option>pack</option><option>bunch</option>
+      </select>
+      <label class="exp-label">expires in <input id="f-days" type="number" min="0" value="7" style="width:4.2em"> days</label>
+      <button class="btn" type="submit">＋ Add</button>
+    </form>
+    <div id="pantry-stats" class="stats-row"></div>
+    <div id="pantry-list" class="card-grid"></div>
+  </section>
+
+  <!-- PLAN -->
+  <section id="tab-plan" class="panel">
+    <div class="panel-head">
+      <h2>This week's dinners</h2>
+      <p class="hint">Humans can drag swaps by clicking a day. Agents call <code>plan_week</code> to auto-generate the whole week around expiry dates — the signature human + agent loop.</p>
+    </div>
+    <div class="plan-actions">
+      <button id="btn-plan-week" class="btn btn-primary">✨ Auto-plan week (agent logic)</button>
+      <button id="btn-clear-plan" class="btn btn-ghost">Clear plan</button>
+      <span id="plan-meta" class="meta"></span>
+    </div>
+    <div id="plan-grid" class="plan-grid"></div>
+  </section>
+
+  <!-- SHOPPING -->
+  <section id="tab-shopping" class="panel">
+    <div class="panel-head">
+      <h2>Shopping list</h2>
+      <p class="hint">Auto-generated from the week plan minus what you already own, consolidated by aisle. Agents fetch it via <code>get_shopping_list</code> or check off items with <code>consume_pantry_items</code>.</p>
+    </div>
+    <div class="plan-actions">
+      <button id="btn-rebuild-list" class="btn btn-primary">↻ Rebuild from plan</button>
+      <span id="shopping-meta" class="meta"></span>
+    </div>
+    <div id="shopping-list" class="shopping-wrap"></div>
+  </section>
+
+  <!-- RECIPES -->
+  <section id="tab-recipes" class="panel">
+    <div class="panel-head">
+      <h2>Recipe library</h2>
+      <p class="hint">A local, offline recipe graph the agent's <code>find_recipes</code> tool searches. Green = you can cook it now.</p>
+    </div>
+    <input id="recipe-search" class="search" placeholder="Search recipes or ingredients…">
+    <div id="recipe-list" class="card-grid"></div>
+  </section>
+
+  <!-- ABOUT / WEBMCP -->
+  <section id="tab-about" class="panel">
+    <div class="panel-head">
+      <h2>How PantryPilot uses WebMCP</h2>
+      <p class="hint">PantryPilot registers structured tools on <code>document.modelContext</code> so any WebMCP-capable agent (ChatGPT's in-app browser, Chrome with the flag enabled) can drive the app natively — no DOM scraping, no guessing.</p>
+    </div>
+    <div class="about-grid">
+      <div class="about-card">
+        <h3>🔌 Registered tools</h3>
+        <ul id="tool-list"></ul>
+      </div>
+      <div class="about-card">
+        <h3>🧩 The code</h3>
+        <pre id="code-sample"></pre>
+      </div>
+      <div class="about-card">
+        <h3>🤝 Why human + agent?</h3>
+        <p>Reading a fridge label, deciding "this looks off", tasting, preferring — that stays human. Bulk planning, expiry triage, list consolidation, nutritional balance — that's agent work. WebMCP is the contract that lets both act on the same state, safely and in structured form.</p>
+        <p class="hint">Open this page in ChatGPT's in-app browser or Chrome with <code>chrome://flags/#enable-webmcp-testing</code> and try: <em>"Plan my week around what's expiring, then give me a shopping list."</em></p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- AGENT CONSOLE -->
+<aside id="agent-console" class="console hidden">
+  <div class="console-head">
+    <strong>🤖 Agent Console</strong>
+    <span class="hint">Simulates what a WebMCP agent can do — same code path the real tools use.</span>
+    <button id="btn-console-close" class="btn btn-ghost btn-sm">✕</button>
+  </div>
+  <div class="console-tools" id="console-tools"></div>
+  <div class="console-log" id="console-log"><div class="log-line dim">Agent activity will appear here…</div></div>
+</aside>
+
+<footer>
+  <span>PantryPilot — a WebMCP Challenge build. Static, offline-first, agent-native.</span>
+  <span id="foot-state"></span>
+</footer>
+
+<script src="js/data.js"></script>
+<script src="js/app.js"></script>
+<script src="js/webmcp.js"></script>
+</body>
+</html>
