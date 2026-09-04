@@ -137,3 +137,12 @@ main { flex: 1; width: min(1080px, 94vw); margin: 0 auto 4rem; }
 
 footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1rem 2rem; border-top: 1px solid var(--line);
   color: var(--dim); font-size: .78rem; flex-wrap: wrap; }
+
+.hidden { display: none !important; }
+.day-actions { display: flex; gap: .45rem; margin-top: .6rem; flex-wrap: wrap; }
+.day-card .cook-btn { margin-top: 0; }
+.rc-head:hover { color: var(--accent2); }
+.rc-detail { border-top: 1px dashed var(--line); margin-top: .6rem; padding-top: .2rem; }
+.steps { margin: .4rem 0 .2rem; padding-left: 1.3rem; font-size: .82rem; line-height: 1.55; color: var(--txt); }
+.steps li { margin: .25rem 0; }
+.steps li::marker { color: var(--accent2); }

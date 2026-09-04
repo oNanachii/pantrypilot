@@ -2,6 +2,10 @@
 
 **PantryPilot is an agent-native kitchen app built for [The WebMCP Challenge](https://webmcp.devpost.com).** Humans stock the pantry and make the calls only humans should make; their AI agents do the bulk work — expiry triage, 7-day meal planning, and shopping-list consolidation — through structured [WebMCP](https://webmachinelearning.github.io/webmcp/) tools instead of guessing at the UI.
 
+![Pantry inventory with expiry urgency](assets/01_pantry.jpg)
+![A week planned around expiry dates](assets/06_plan.jpg)
+![Shopping list consolidated by aisle](assets/07_shopping.jpg)
+
 ## The human + agent split
 
 | Humans (tap/click) | Agents (WebMCP tools) |

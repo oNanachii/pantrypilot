@@ -13,7 +13,18 @@ function todayISO(offset = 0) {
 }
 function daysLeft(iso) { return Math.round((new Date(iso) - new Date(todayISO())) / 86400000); }
 function canonical(s) { return String(s || "").trim().toLowerCase(); }
+function fmtQty(q) {
+  const r = Math.round(q * 100) / 100;
+  return Number.isInteger(r) ? String(r) : String(r);
+}
+function recipeById(id) { return RECIPE_DB.find(x => x.id === id); }
+/* Real per-recipe portions (2 servings): [{ingredient, qty, unit}] */
+function recipePortions(recipeId) {
+  const r = recipeById(recipeId); if (!r) return [];
+  return r.ingredients.map(n => { const p = portionFor(canonical(n)); return { ingredient: canonical(n), qty: p.qty, unit: p.unit }; });
+}
 
+/* ---------- state ---------- */
 function seed() {
   state.pantry = SEED_PANTRY.map((p, i) => ({
     id: "p" + i, name: p.name, qty: p.qty, unit: p.unit, category: p.category,
@@ -46,37 +57,52 @@ const Tools = {
   },
 
   add_pantry_items({ items }) {
-    const added = [];
+    const added = [], notes = [];
     for (const it of (items || [])) {
-      const name = canonical(it.name); if (!name) continue;
-      const qty = Number(it.quantity) || 1;
+      const raw = String(it.name || "").trim();
+      if (!raw) { notes.push("skipped a row with no name"); continue; }
+      const name = canonical(raw);
+      let qty = Number(it.quantity);
+      if (!isFinite(qty) || qty <= 0) { qty = 1; notes.push(name + ": quantity missing/invalid, defaulted to 1"); }
       const unit = it.unit || "pcs";
-      const days = Number(it.expires_in_days ?? it.expiresInDays ?? 7);
+      let days = Number(it.expires_in_days ?? it.expiresInDays ?? 7);
+      if (!isFinite(days)) { days = 7; notes.push(name + ": expiry missing, defaulted to 7 days"); }
+      days = Math.max(0, Math.min(730, Math.round(days)));
       const existing = state.pantry.find(p => canonical(p.name) === name && p.unit === unit);
-      if (existing) { existing.qty += qty; existing.expiry = todayISO(days); added.push(name + " (merged, now " + existing.qty + " " + unit + ")"); }
+      if (existing) { existing.qty += qty; existing.expiry = todayISO(days); added.push(name + " (merged, now " + fmtQty(existing.qty) + " " + unit + ")"); }
       else {
-        state.pantry.push({ id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), name: it.name.trim(),
+        state.pantry.push({ id: "p" + Date.now() + Math.random().toString(36).slice(2, 6), name: raw,
           qty, unit, category: it.category || categoryFor(name), expiry: todayISO(days) });
         added.push(name);
       }
     }
     save(); renderAll();
-    return { added, pantry_size: state.pantry.length, message: "Added " + added.length + " item(s) to the pantry." };
+    return { added, pantry_size: state.pantry.length,
+      message: "Added " + added.length + " item(s) to the pantry." + (notes.length ? " Notes: " + notes.join("; ") : "") };
   },
 
   consume_pantry_items({ items }) {
-    const consumed = [], missing = [];
+    const consumed = [], missing = [], skipped = [];
     for (const it of (items || [])) {
       const name = canonical(it.name);
       const p = state.pantry.find(x => canonical(x.name) === name);
       if (!p) { missing.push(it.name); continue; }
-      const use = Number(it.quantity) || p.qty;
-      p.qty -= use;
-      if (p.qty <= 0.001) { state.pantry = state.pantry.filter(x => x.id !== p.id); consumed.push(p.name + " (used up)"); }
-      else consumed.push(p.name + " (" + p.qty + " " + p.unit + " left)");
+      const want = (it.quantity === undefined || it.quantity === null)
+        ? null : { qty: Number(it.quantity), unit: it.unit || p.unit };
+      if (!want) { state.pantry = state.pantry.filter(x => x.id !== p.id); consumed.push(p.name + " (used up)"); continue; }
+      if (!isFinite(want.qty) || want.qty <= 0) { skipped.push(p.name + " (invalid quantity)"); continue; }
+      const haveBase = toBase(p.qty, p.unit), wantBase = toBase(want.qty, want.unit);
+      if (!haveBase || !wantBase || haveBase.unit !== wantBase.unit) {
+        skipped.push(p.name + " (unit mismatch: pantry " + p.unit + ", asked " + want.unit + ")");
+        continue;
+      }
+      const left = haveBase.qty - wantBase.qty;
+      const backFactor = UNIT_BASE[p.unit][1];
+      if (left <= 0.001) { state.pantry = state.pantry.filter(x => x.id !== p.id); consumed.push(p.name + " (used up)"); }
+      else { p.qty = Math.round((left / backFactor) * 1000) / 1000; consumed.push(p.name + " (" + fmtQty(p.qty) + " " + p.unit + " left)"); }
     }
     save(); renderAll();
-    return { consumed, not_in_pantry: missing, pantry_size: state.pantry.length };
+    return { consumed, not_in_pantry: missing, unit_mismatches: skipped, pantry_size: state.pantry.length };
   },
 
   find_recipes({ query, ingredients, max_missing = 3 } = {}) {
@@ -94,6 +120,8 @@ const Tools = {
         cookable_now: missing.length === 0,
         missing_ingredients: missing,
         uses_expiring: urgentHits,
+        steps: r.steps,
+        portions: recipePortions(r.id).map(p => p.ingredient + ": " + fmtQty(p.qty) + " " + p.unit),
         score: urgentHits.length * 2 - missing.length };
     })
     .filter(r => !q || canonical(r.name).includes(q) || RECIPE_DB.find(x => x.id === r.id).ingredients.some(i => canonical(i).includes(q)))
@@ -102,13 +130,14 @@ const Tools = {
     return { matches: out.length, recipes: out.slice(0, 12) };
   },
 
-  plan_week() {
+  plan_week({ days = 7 } = {}) {
+    days = Math.max(1, Math.min(14, Math.round(Number(days) || 7)));
     const pool = RECIPE_DB.map(r => ({ ...r, ings: r.ingredients.map(canonical) }));
     const urgency = new Map(state.pantry.map(p => [canonical(p.name), daysLeft(p.expiry)]));
     const usedRecently = [];
     const plan = {};
     const dayNames = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
-    for (let d = 0; d < 7; d++) {
+    for (let d = 0; d < days; d++) {
       const date = todayISO(d);
       let best = null, bestScore = -1e9;
       for (const r of pool) {
@@ -134,7 +163,7 @@ const Tools = {
       days: Object.keys(plan).length,
       expiring_items_covered: urgentUsed,
       summary: Object.entries(plan).map(([date, p]) => p.day + " " + date + ": " + p.name),
-      message: "Planned 7 dinners prioritizing items that expire soon. Call get_shopping_list for missing ingredients."
+      message: "Planned " + days + " dinner(s) prioritizing items that expire soon. Call get_shopping_list for missing ingredients with amounts."
     };
   },
 
@@ -150,15 +179,18 @@ const Tools = {
     const have = new Map(state.pantry.map(p => [canonical(p.name), p]));
     const need = new Map(), willUse = new Set();
     for (const { recipe_id } of Object.values(state.plan)) {
-      const r = RECIPE_DB.find(x => x.id === recipe_id); if (!r) continue;
-      for (const ing of r.ingredients.map(canonical)) {
+      const r = recipeById(recipe_id); if (!r) continue;
+      for (const portion of recipePortions(recipe_id)) {
+        const ing = portion.ingredient;
         const p = have.get(ing);
         if (p) { willUse.add(p.name); }
-        else if (!need.has(ing)) need.set(ing, { ingredient: ing, aisle: categoryFor(ing), needed_for: 1 });
-        else need.get(ing).needed_for++;
+        else if (!need.has(ing)) need.set(ing, { ingredient: ing, amount: portion.qty, unit: portion.unit, aisle: categoryFor(ing), needed_for: 1 });
+        else { const e = need.get(ing); e.amount = Math.round((e.amount + portion.qty) * 100) / 100; e.needed_for++; }
       }
     }
-    const list = [...need.values()].sort((a, b) => a.aisle.localeCompare(b.aisle));
+    const list = [...need.values()]
+      .map(i => ({ ingredient: i.ingredient, amount: fmtQty(i.amount) + " " + i.unit, aisle: i.aisle, needed_for: i.needed_for }))
+      .sort((a, b) => a.aisle.localeCompare(b.aisle));
     return {
       items_to_buy: list.length,
       shopping_list: list,
@@ -175,15 +207,52 @@ const Tools = {
       const recipes = RECIPE_DB
         .map(r => ({ name: r.name, emoji: r.emoji, minutes: r.minutes,
           match: r.ingredients.filter(i => canonical(i) === canonical(item.name)).length,
+          steps: r.steps,
           extra_missing: r.ingredients.filter(i => !state.pantry.some(p => canonical(p.name) === canonical(i)) && canonical(i) !== canonical(item.name)) }))
         .filter(r => r.match > 0).sort((a, b) => a.extra_missing.length - b.extra_missing.length)
         .slice(0, 3);
-      return { item: item.name, expires_on: item.expiry, days_left: item.days_left, quantity: item.qty + " " + item.unit, recipe_ideas: recipes };
+      return { item: item.name, expires_on: item.expiry, days_left: item.days_left, quantity: fmtQty(item.qty) + " " + item.unit, recipe_ideas: recipes };
     });
     return { window_days: days, at_risk_items: suggestions.length, suggestions,
       message: suggestions.length ? "Prioritize these before they spoil." : "Nothing expiring soon — nice and fresh." };
   }
 };
+
+/* Swap one planned day for the next-best recipe (human control; UI-only). */
+function swapDay(date) {
+  const cur = state.plan[date];
+  if (!cur) return { ok: false, message: "No plan for " + date };
+  const inPlan = new Set(Object.values(state.plan).map(p => p.recipe_id));
+  const urgency = new Map(state.pantry.map(p => [canonical(p.name), daysLeft(p.expiry)]));
+  const score = r => {
+    let s = 0;
+    for (const ing of r.ingredients.map(canonical)) {
+      const dl = urgency.get(ing);
+      if (dl !== undefined && dl <= 5) s += (6 - Math.max(dl, 0)) * 3;
+    }
+    return s - r.minutes / 60;
+  };
+  let cands = RECIPE_DB.filter(r => r.id !== cur.recipe_id && !inPlan.has(r.id));
+  if (!cands.length) cands = RECIPE_DB.filter(r => r.id !== cur.recipe_id);
+  cands.sort((a, b) => score(b) - score(a));
+  const next = cands[0];
+  const covered = next.ingredients.map(canonical).filter(ing => {
+    const dl = urgency.get(ing); return dl !== undefined && dl <= 5;
+  });
+  state.plan[date] = { recipe_id: next.id, name: next.name, emoji: next.emoji, minutes: next.minutes,
+    covers_expiring: covered, day: cur.day };
+  save(); renderAll();
+  return { ok: true, date, from: cur.name, to: next.name };
+}
+
+/* Cook a planned meal: deduct real portions from the pantry. */
+function cookDay(date) {
+  const p = state.plan[date]; if (!p) return null;
+  const r = recipeById(p.recipe_id); if (!r) return null;
+  const res = Tools.consume_pantry_items({ items: recipePortions(r.id).map(pt => ({ name: pt.ingredient, quantity: pt.qty, unit: pt.unit })) });
+  delete state.plan[date]; save(); renderAll();
+  return { recipe: r.name, consumed: res.consumed.length, skipped: res.unit_mismatches.length };
+}
 
 /* ---------- rendering ---------- */
 const $ = s => document.querySelector(s);
@@ -202,7 +271,7 @@ function renderPantry() {
     const cls = dl <= 3 ? "urgent" : dl > 14 ? "fresh" : "";
     return `<div class="card ${cls}">
       <button class="del" data-del="${esc(p.name)}" title="Remove">✕</button>
-      <h4>${esc(p.name)}<span class="qty">${p.quantity} ${esc(p.unit)}</span></h4>
+      <h4>${esc(p.name)}<span class="qty">${fmtQty(p.quantity)} ${esc(p.unit)}</span></h4>
       <div class="sub">${p.days_left < 0 ? "expired" : dl === 0 ? "expires today" : dl + " days left"} · ${esc(p.category)}</div>
       <div class="exp-bar"><i style="width:${pct}%;background:${expColor(dl)}"></i></div>
       <span class="chip">expires ${p.expires_on}</span>
@@ -211,20 +280,27 @@ function renderPantry() {
 }
 
 function renderPlan() {
-  const dates = Array.from({ length: 7 }, (_, i) => todayISO(i));
+  const dates = Object.keys(state.plan || {}).sort();
+  if (!dates.length) {
+    $("#plan-grid").innerHTML = `<p class="hint">Nothing planned yet — tap ✨ Auto-plan week, or ask your agent to call <code>plan_week</code>.</p>`;
+    $("#plan-meta").textContent = "";
+    return;
+  }
   $("#plan-grid").innerHTML = dates.map(d => {
     const p = state.plan[d];
-    if (!p) return `<div class="day-card"><div class="dow">${new Date(d + "T12:00:00").toLocaleDateString(undefined,{weekday:"long"})} · ${d.slice(5)}</div><p class="empty-day">Nothing planned — tap ✨ Auto-plan.</p></div>`;
     return `<div class="day-card">
       <div class="dow">${esc(p.day)} · ${d.slice(5)}</div>
       <h4>${p.emoji} ${esc(p.name)}</h4>
       <div class="sub">~${p.minutes} min · serves 2</div>
       ${p.covers_expiring.length ? `<div class="uses">♻️ uses up: ${p.covers_expiring.map(esc).join(", ")}</div>` : `<div class="uses">—</div>`}
-      <button class="btn btn-sm cook-btn" data-cook="${d}">✅ Cooked it (update pantry)</button>
+      <div class="day-actions">
+        <button class="btn btn-sm" data-swap="${d}">🔀 Swap</button>
+        <button class="btn btn-sm cook-btn" data-cook="${d}">✅ Cooked it (update pantry)</button>
+      </div>
     </div>`;
   }).join("");
   const covered = new Set(Object.values(state.plan || {}).flatMap(p => p.covers_expiring)).size;
-  $("#plan-meta").textContent = state.plan && Object.keys(state.plan).length ? `${Object.keys(state.plan).length} days planned · ${covered} expiring items put to use` : "";
+  $("#plan-meta").textContent = `${dates.length} day(s) planned · ${covered} expiring items put to use`;
 }
 
 function renderShopping() {
@@ -235,7 +311,7 @@ function renderShopping() {
   $("#shopping-list").innerHTML = Object.entries(byAisle).map(([aisle, items]) => `
     <div class="aisle"><h4>${esc(aisle)}</h4>${items.map(i => `
       <label><input type="checkbox" data-check="${esc(i.ingredient)}" ${state.checked[i.ingredient] ? "checked" : ""}>
-      ${esc(i.ingredient)} <span class="hint">(for ${i.needed_for} meal${i.needed_for > 1 ? "s" : ""})</span></label>`).join("")}
+      ${esc(i.ingredient)} <b>${esc(i.amount)}</b> <span class="hint">(for ${i.needed_for} meal${i.needed_for > 1 ? "s" : ""})</span></label>`).join("")}
     </div>`).join("") +
     (res.will_use_from_pantry.length ? `<div class="aisle" style="grid-column:1/-1"><h4>♻️ Will use from pantry (${res.will_use_from_pantry.length})</h4><div class="hint">${res.will_use_from_pantry.map(esc).join(" · ")}</div></div>` : "");
   $("#shopping-meta").textContent = `${res.items_to_buy} items to buy`;
@@ -244,13 +320,20 @@ function renderShopping() {
 function renderRecipes() {
   const q = canonical($("#recipe-search").value);
   const res = Tools.find_recipes({ query: q || undefined, max_missing: 6 });
-  $("#recipe-list").innerHTML = res.recipes.map(r => `
+  $("#recipe-list").innerHTML = res.recipes.map(r => {
+    const real = recipeById(r.id);
+    return `
     <div class="card recipe-card ${r.cookable_now ? "cookable" : ""}">
-      <h4>${r.emoji} ${esc(r.name)}<span class="qty">${r.minutes}′</span></h4>
+      <h4 class="rc-head" data-recipe="${r.id}" style="cursor:pointer">${r.emoji} ${esc(r.name)}<span class="qty">${r.minutes}′ ${r.cookable_now ? "· ✓" : ""}</span></h4>
       ${r.cookable_now ? `<span class="chip" style="color:var(--green)">✓ cookable now</span>` :
         `<div class="missing">missing: ${r.missing_ingredients.map(esc).join(", ")}</div>`}
       ${r.uses_expiring.length ? `<span class="chip" style="color:var(--accent2)">♻️ uses ${r.uses_expiring.map(esc).join(", ")}</span>` : ""}
-    </div>`).join("") || `<p class="hint">No matches.</p>`;
+      <div class="rc-detail hidden" id="rc-${r.id}">
+        <div class="sub" style="margin:.5rem 0 .2rem"><b>Portions (2 servings):</b> ${real.ingredients.map(n => { const p = portionFor(canonical(n)); return esc(n) + " " + fmtQty(p.qty) + p.unit; }).join(" · ")}</div>
+        <ol class="steps">${real.steps.map(s => `<li>${esc(s)}</li>`).join("")}</ol>
+      </div>
+    </div>`;
+  }).join("") || `<p class="hint">No matches.</p>`;
 }
 
 function renderAbout() {
@@ -258,8 +341,10 @@ function renderAbout() {
   $("#tool-list").innerHTML = defs.map(d => `<li><b>${d.name}</b> — ${esc(d.description)}</li>`).join("");
   $("#code-sample").textContent = `document.modelContext.registerTool({
   name: "plan_week",
-  description: "Plan 7 dinners around what is expiring first",
-  inputSchema: { type: "object", properties: {} },
+  description: "Plan dinners around what is expiring first",
+  inputSchema: { type: "object",
+    properties: { days: { type: "number" } } },
+  annotations: { readOnlyHint: false },
   execute: async (input) => Tools.plan_week(input)
 });`;
 }
@@ -292,14 +377,23 @@ function wire() {
   $("#btn-rebuild-list").addEventListener("click", () => { renderShopping(); });
 
   $("#plan-grid").addEventListener("click", e => {
+    const sw = e.target.dataset.swap;
+    if (sw) {
+      const res = swapDay(sw);
+      if (res.ok) consoleLog("ui", null, "Swapped " + res.date + ": " + res.from + " → " + res.to);
+      return;
+    }
     const d = e.target.dataset.cook;
     if (!d) return;
-    const p = state.plan[d]; if (!p) return;
-    const r = RECIPE_DB.find(x => x.id === p.recipe_id);
-    if (!r) return;
-    Tools.consume_pantry_items({ items: r.ingredients.map(n => ({ name: n, quantity: 0.001 })) });
-    delete state.plan[d]; save(); renderAll();
-    consoleLog("ui", "Marked \"" + r.name + "\" cooked — pantry updated");
+    const res = cookDay(d);
+    if (res) consoleLog("ui", null, "Cooked \"" + res.recipe + "\" — pantry updated (" + res.consumed + " deducted, " + res.skipped + " unit mismatches)");
+  });
+
+  $("#recipe-list").addEventListener("click", e => {
+    const head = e.target.closest ? e.target.closest("[data-recipe]") : null;
+    if (!head) return;
+    const box = document.getElementById("rc-" + head.dataset.recipe);
+    if (box) box.classList.toggle("hidden");
   });
 
   $("#shopping-list").addEventListener("change", e => {
